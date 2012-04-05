@@ -1,19 +1,22 @@
-#from gelf import g_interface, g_engine
-import threading, sys, signal, time, Queue
+import argparse
+import threading, sys
 import os
+import time
+import struct
 
 import cherrypy
 
 from ws4py.server.cherrypyserver import WebSocketPlugin, WebSocketTool
 from ws4py.websocket import WebSocket
-from ws4py.messaging import TextMessage
+from ws4py.messaging import BinaryMessage
 
-import subprocess
-#import cherrypy
+from ws4py.client.threadedclient import WebSocketClient
 
-class G_Web(object):
-	def __init__(self, engine):
-		self.eng = engine
+class GelfRelay(object):
+	def __init__(self, host, port):
+		self.host = host
+		self.port = port
+		self.scheme = 'ws'
 		pass
 	
 	@cherrypy.expose
@@ -21,73 +24,31 @@ class G_Web(object):
 		cherrypy.log("Handler created: %s" % repr(cherrypy.request.ws_handler))
 	
 	@cherrypy.expose
-	def index(self):
+	def index(self, name=None):
 		"""
 		HTML for web relay, including JS to run the WS, maybe some stats/metrics features.
 		"""
-		self.scheme = "ws" #wss for ssl support 
-		self.host = "localhost" #changeme
-		self.port = 9000 #changeme
 		page = """<html>
     <head>
       <script type='application/javascript' src='/js/jquery-1.6.2.min.js'></script>
+      <script type='application/javascript' src='/js/gelf.js'></script>
       <script type='application/javascript'>
-        $(document).ready(function() {
-
-          websocket = '%(scheme)s://%(host)s:%(port)s/ws';
-          if (window.WebSocket) {
-            ws = new WebSocket(websocket);
-          }
-          else if (window.MozWebSocket) {
-            ws = MozWebSocket(websocket);
-          }
-          else {
-            console.log('WebSocket Not Supported');
-            return;
-          }
-
-          window.onbeforeunload = function(e) {
-            $('#chat').val($('#chat').val() + 'Bye bye...\\n');
-            ws.close(1000, 'fake left the room');
-                 
-            if(!e) e = window.event;
-            e.stopPropagation();
-            e.preventDefault();
-          };
-          ws.onmessage = function (evt) {
-             $('#chat').val($('#chat').val() + evt.data + '\\n');
-          };
-          ws.onopen = function() {
-             ws.send("fake entered the room");
-          };
-          ws.onclose = function(evt) {
-             $('#chat').val($('#chat').val() + 'Connection closed by server: ' + evt.code + ' \"' + evt.reason + '\"\\n');  
-          };
-
-          $('#send').click(function() {
-             console.log($('#message').val());
-             ws.send('fake: ' + $('#message').val());
-             $('#message').val("");
-             return false;
-          });
-        });
+      	$(document).ready(function() { gelf.main('%(host)s', '%(port)s');} );
       </script>
     </head>
     <body>
-    <form action='#' id='chatform' method='get'>
-      <textarea id='chat' cols='35' rows='10'></textarea>
+    <form action='#' id='relayform' method='get'>
+      <textarea id='log' cols='70' rows='30'></textarea>
       <br />
-      <label for='message'>fake: </label><input type='text' id='message' />
-      <input id='send' type='submit' value='Send' />
+      <label for='message'>new: </label><input type='text' id='host' /> <input type='text' id='port' />
+      <input id='add' type='button' value='Add' />
       </form>
     </body>
     </html>
     """ % {'host': self.host, 'port': self.port, 'scheme': self.scheme}
-		while self.eng.outgoing.empty() == False:
-			page += self.eng.get_outgoing().layer3.encode("hex")
 		return page
 
-class G_Web_WS(WebSocket):
+class GelfWebSocketHandler(WebSocket):
 	def received_message(self, m):
 		"""
 		Web server sends data to incoming queue
@@ -98,154 +59,175 @@ class G_Web_WS(WebSocket):
 		"""
 		Client disconnects from relay
 		"""
-		cherrypy.engine.publish('websocket-broadcast', TextMessage(reason))
+		cherrypy.engine.publish('websocket-broadcast', BinaryMessage(reason))
 
-class Packet():
-	ether = None
-	layer3 = None
-
-class G_Engine():
-	outgoing = Queue.Queue()
-	incoming = Queue.Queue()
-	
-	def put_outgoing(self, packet):
-		self.outgoing.put(packet)
-		pass
-	
-	def get_outgoing(self):
-		packet = self.outgoing.get()
-		self.outgoing.task_done()
-		return packet
-	
-	def put_incoming(self, packet):
-		self.incoming.put(packet)
-		pass
-	
-	def get_incoming(self):
-		packet = self.incoming.get()
-		self.incoming.task_done()
-		return packet
-
-class G_Interface():
-	def __init__(self, dev):
+class GelfInterface():
+	def __init__(self, hw_port="", use_header=False, mtu=1500):
 		"""
 		Open interface dev for reading, in this example we use a tun0
 		
 		Args:
 			dev: the interface to read/write from
 		"""
-		self.mtu = 1500
+		self.mtu = mtu
 		self.fd = None
+		self.hw_port = hw_port
+		self.use_header = use_header
 		
-		if True:
-			self.osx_create_tap(dev)
-		
+		self.open_tap()
 	
-	def osx_create_tap(self, dev):
-		"""
-		If the target OS is OSX, we create a tap device by opening it R/W.
-		We cannot read input/output until the device is configured.
-		
-		Args:
-			dev: the device (tapX) to be configured.
-		"""
-		if not os.path.exists("/dev/%s" % dev):
-			print "[G_Interface//Error]: Device %s does not exist" % dev
-		try:
-			self.fd = os.open("/dev/%s" % dev, os.O_RDWR)
-		except OSError as e:
-			print "[G_Interface//Error]:", e
+	def darwin_init_interface(self):
+		path = None
+		for i in range(15):
+			try:
+				path = "tap%d" % i
+				self.fd = os.open(os.path.join("/dev/", path), os.O_RDWR)
+				break
+			except: #OSError as e
+				path = None
+				self.fd = None
+		if self.fd == None:
+			print "[GelfInterface//Error]: Could not open /dev/tap{0,15}"
 			sys.exit(1)
-		subprocess.call(["ifconfig", dev, "up"])
-		
+		print "[GelfInterface//Notice]: Opened", path
+		return path
+	
+	def linux_init_interface(self):
+		import fcntl
+		clone_fd = os.open('/dev/net/tun', os.O_RDWR)
+		for i in range(15):
+			try:
+				path = 'tap%d' % i
+				ifr = struct.pack('16sH', path, 0x0002 | 0x1000)
+				fcntl.ioctl(clone_fd, 0x400454CA, ifr)
+				break
+			except: #IOError as e
+				path = None
+				ifr = None
+		if path == None:
+			print "[GelfInterface//Error]: Could not open tap{0,15}"
+			sys.exit(1)
+		# Optionally, we want it be accessed by the normal user.
+		# fcntl.ioctl(clone_fd, 0x400454CA + 2, 1000)
+		self.fd = clone_fd
+		return path
+		pass
+	
+	def open_tap(self):
+		import platform, subprocess
+		dev = None
+		if platform.system() == "Darwin":
+			dev = self.darwin_init_interface()
+		elif platform.system() == "Linux":
+			dev = self.linux_init_interface()
+		else:
+			print "[GelfInterface//Error]: Unknown system", platform.system()
+			sys.exit(1)
+		subprocess.call(["/sbin/ifconfig", dev, "up"])
 		
 	def read(self):
 		"""
 		Read data from the configured interface.
-		This function should be replaced with a call to a scapy/pickel reader.
 		"""
 		
-		packet = Packet()
 		read_buffer = None
 		try:
-			read_buffer = os.read(self.fd, self.mtu)
-			packet.ether = read_buffer[:14]
-			packet.layer3 = read_buffer[14:]
+			length = struct.pack('B', len(self.hw_port)) if self.use_header else ""
+			read_buffer = b"".join([length, self.hw_port, os.read(self.fd, self.mtu)])
 		except OSError as e:
 			print "[G_Interface//Error]:", e
 			sys.exit(1)
-		'''Separate the layer2/3 data for future decision on whether to use/forward layer2 information'''
-		return packet
+		return read_buffer
 	
 	def write(self, packet):
 		"""
 		Write layer 3 data to interface
 		"""
 		write_status = -1
+		if self.use_header and packet[1:packet[0]+1] == self.hw_port: 
+			# If L1 headers are used, drop data originating from this virtual hw_port
+			return write_status
 		try:
-			write_status = os.write(self.fd, packet.layer3)
+			data = packet[packet[0]+1:] if self.use_header else packet
+			write_status = os.write(self.fd, data)
 		except OSError as e:
 			print e
 			sys.exit(1)
 		return write_status
 
-class T_IO(threading.Thread):
-	interface = None
-	engine = None
-	def __init__(self, g_int, g_eng, ws):
+class GelfOutgoingThread(threading.Thread):
+	def __init__(self, interface, ws):
 		threading.Thread.__init__(self)
-		self.interface = g_int
-		self.engine = g_eng
-		self.kill_received = False
 		self.ws = ws
-
-class T_Outgoing(T_IO):
-	def __init__(self, g_int, g_eng, ws):
-		T_IO.__init__(self, g_int, g_eng, ws)
-		
-	def run(self):
-		"""
-		Read from g_int.read() and write to g_eng.outgoing
-		"""
+		self.interface = interface
+		self.kill_received = False
 	
+	def run(self):
 		print "[T_Outgoing//Notice]: Running"
 		
-		#Testing
-		# Read binary data into out_buffer	
-		packet = Packet()
-		#while True:
-		while not self.kill_received: # debuggin
+		while not self.kill_received:
 			packet = self.interface.read()
-			if packet.ether is None:
-				continue
-			print "[T_Outgoing//Debug]: Read packet", packet.layer3.encode("hex")
-			'''Todo: obtain mutext on g_eng.outgoing'''
-			#self.engine.put_outgoing(packet)
-			#time.sleep(0)
-			"""Hack, write directly to the WS"""
-			ws.broadcast(TextMessage(packet.layer3.encode("hex")))
+			self.ws.broadcast(BinaryMessage(packet))
 
-class T_Incoming(T_IO):
-	def __init__(self, g_int, g_eng, ws):
-		T_IO.__init__(self, g_int, g_eng, ws)	
+
+class GelfIncomingClient(WebSocketClient):
+	def __init__(self, interface=None, host=None, port=None):
+		self.host = host
+		self.port = port
+		WebSocketClient.__init__(self, 'ws://%s:%s/ws' % (host, port), protocols=['http-only', 'chat'])
+		self.interface = interface
+		self.kill_received = False	
 		
-	def run(self):
+	def opened(self):
+		print "[GelfIncomingThread//Debug]: Running"
+		
+	def received_message(self, m):
 		"""
 		Read from g_int.read() and write to g_eng.outgoing
 		"""
-	
-		# Read binary data into out_buffer	
-		out_buffer =""
-		while not self.kill_received:
-			out_buffer = self.interface.read()
-			'''Todo: obtain mutext on g_eng.outgoing'''
-			self.engine.add_outgoing(out_buffer)	
+		if self.interface is not None:
+			print "[GelfIncomingThread//Debug]: received packet", repr(m)
+			self.interface.write(m.data)
 
-def start_threads(g_int, g_eng, ws):
+class GelfRelayThread(threading.Thread):
+	ws = None
+	started = None
+	def __init__(self, host, port, ws):
+		threading.Thread.__init__(self)
+		self.ws = ws
+		self.host = host
+		self.port = port
+		
+	def run(self):
+		if ws is None:
+			print "[GelfRelayThread//Error]: WS not provided"
+			return
+		# Cherrypy configurations
+		cherrypy.config.update({
+			"server.socket_host": self.host,
+			"server.socket_port": self.port,
+			"tools.staticdir.root": os.path.abspath(os.path.join(os.path.dirname(__file__), 'static'))
+		})
+		ws.subscribe()
+		cherrypy.tools.websocket = WebSocketTool()
+	
+		# Set websocket url, and static js directory	
+		cherrypy.quickstart(GelfRelay(self.host, self.port), '', config={
+			"/ws": {
+				'tools.websocket.on': True,
+				'tools.websocket.handler_cls': GelfWebSocketHandler
+			},
+			"/js": {
+				"tools.staticdir.on": True,
+				"tools.staticdir.dir": "js"
+			}
+		})
+
+def start_threads(g_int, ws):
 	threads = []
-	t = T_Outgoing(g_int, g_eng, ws)
-	threads.append(t)
-	threads[-1].start()
+	#t = T_Outgoing(g_int, ws)
+	#threads.append(t)
+	#threads[-1].start()
 	return threads
 
 def join_threads(threads):
@@ -258,41 +240,38 @@ def joiner(signum, frame):
 	sys.exit() 
 
 if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description='Gelf, the layer 1 over HTTP client/server/relay.')
+	parser.add_argument('--host', default='127.0.0.1', help='Hostname used by the web server, default is 127.0.0.1')
+	#parser.add_argument('interface', help='The device name (relative to /dev) that gelf will attach to an http L1 relay (a tap device).')
+	parser.add_argument('port', type=int, help='TCP port used by the web server')
+	parser.add_argument('--ssl', action='store_true', help='Enable SSL via web socket')
+	parser.add_argument("--l1h", action='store_true', help='Add a L1 header, to prevent writing to the origin interface')
+	parser.add_argument("--mtu", default=1500, type=int, help="Set the size of the read buffer for the device interface")
+	parser.add_argument('--enc', help='Use the provided symmetric encryption key to encrypt data')
+	args = parser.parse_args()
+	
+	# Start read/write interface
+	hw_port = b"%s-%s" % (args.host, args.port) if args.l1h else ""
+	interface = GelfInterface(hw_port=hw_port, use_header=args.l1h, mtu=args.mtu)
+
 	# Enable websocket plugin for cherrypy
 	ws = WebSocketPlugin(cherrypy.engine)
-
-	# Create Queue managers
-	engine = G_Engine(ws)
-	# Start read/write interface
-	interface = G_Interface("tap0")
-	# Instanciate web handler
-	web = G_Web()
+	webthread = GelfRelayThread(args.host, args.port, ws)
+	webthread.start()
 
 	# Start read/write threads
-	threads = start_threads(interface, engine, ws)
+	incoming = GelfIncomingClient(interface, args.host, args.port)
+	outgoing = GelfOutgoingThread(interface, ws)
 
-	# Cherrypy configurations
-	cherrypy.config.update({
-		"server.socket_host": "127.0.0.1",
-		"server.socket_port": 9000,
-		"tools.staticdir.root": os.path.abspath(os.path.join(os.path.dirname(__file__), 'static'))
-	})
-	ws.subscribe()
-	cherrypy.tools.websocket = WebSocketTool()
-
-	# Set websocket url, and static js directory	
-	cherrypy.quickstart(web, '', config={
-		"/ws": {
-			'tools.websocket.on': True,
-			'tools.websocket.handler_cls': G_Web_WS
-		},
-		"/js": {
-			"tools.staticdir.on": True,
-			"tools.staticdir.dir": "js"
-		}
-	})
+	time.sleep(2)
+	incoming.connect()
+	outgoing.start()
+	
+	webthread.join()
+	outgoing.join()
 	
 	# Debugging
+	"""
 	while len(threads) > 0:
 		try:
 			threads = [t.join(1) for t in threads if t is not None and t.isAlive()]
@@ -302,5 +281,6 @@ if __name__ == "__main__":
 				t.kill_received = True
 	#join_threads(threads)
 	#cherrypy.quickstart(g_web)
+	"""
 
 
