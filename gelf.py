@@ -1,14 +1,16 @@
 import argparse
-import threading, sys
+import threading
+import sys
 import os
 import time
 import struct
+import base64
 
 import cherrypy
 
 from ws4py.server.cherrypyserver import WebSocketPlugin, WebSocketTool
 from ws4py.websocket import WebSocket
-from ws4py.messaging import BinaryMessage
+from ws4py.messaging import TextMessage
 
 from ws4py.client.threadedclient import WebSocketClient
 
@@ -59,7 +61,7 @@ class GelfWebSocketHandler(WebSocket):
 		"""
 		Client disconnects from relay
 		"""
-		cherrypy.engine.publish('websocket-broadcast', BinaryMessage(reason))
+		cherrypy.engine.publish('websocket-broadcast', TextMessage(reason))
 
 class GelfInterface():
 	def __init__(self, hw_port="", use_header=False, mtu=1500):
@@ -133,22 +135,33 @@ class GelfInterface():
 		read_buffer = None
 		try:
 			length = struct.pack('B', len(self.hw_port)) if self.use_header else ""
-			read_buffer = b"".join([length, self.hw_port, os.read(self.fd, self.mtu)])
+			#print "Len:", length
+			read_buffer = base64.b64encode(b"".join([length, self.hw_port, os.read(self.fd, self.mtu)]))
 		except OSError as e:
 			print "[G_Interface//Error]:", e
 			sys.exit(1)
+		print "R Packet: ", len(read_buffer)
 		return read_buffer
 	
 	def write(self, packet):
+		import json
 		"""
 		Write layer 3 data to interface
 		"""
 		write_status = -1
-		if self.use_header and packet[1:packet[0]+1] == self.hw_port: 
+		try:
+			write_buffer = json.loads(str(packet))
+			write_buffer = base64.b64decode(write_buffer["data"])
+		except (ValueError, TypeError):
+			return write_status
+		
+		#print "hw_port:", write_buffer[1:write_buffer[0]+1], write_buffer[1:write_buffer[0]+1] == self.hw_port
+		if self.use_header and write_buffer[1:write_buffer[0]+1] == self.hw_port: 
 			# If L1 headers are used, drop data originating from this virtual hw_port
 			return write_status
 		try:
-			data = packet[packet[0]+1:] if self.use_header else packet
+			print "W Packet: ", len(write_buffer)
+			data = write_buffer[write_buffer[0]+1:] if self.use_header else write_buffer
 			write_status = os.write(self.fd, data)
 		except OSError as e:
 			print e
@@ -167,7 +180,7 @@ class GelfOutgoingThread(threading.Thread):
 		
 		while not self.kill_received:
 			packet = self.interface.read()
-			self.ws.broadcast(BinaryMessage(packet))
+			self.ws.broadcast(TextMessage(packet))
 
 
 class GelfIncomingClient(WebSocketClient):
@@ -263,12 +276,14 @@ if __name__ == "__main__":
 	incoming = GelfIncomingClient(interface, args.host, args.port)
 	outgoing = GelfOutgoingThread(interface, ws)
 
+	#interface.write("hello world")
+
 	time.sleep(2)
 	incoming.connect()
 	outgoing.start()
 	
-	webthread.join()
-	outgoing.join()
+	#outgoing.join()
+	#webthread.join()
 	
 	# Debugging
 	"""

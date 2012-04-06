@@ -23,13 +23,31 @@ var gelf = {
 		},
 		received_message: function (ws, evt) {
            	var i = 0;
+           	/** Hack: detect already forwarded data **/
+           	try {
+           		JSON.parse(evt.data);
+           		this.log("Caught already forwarded message, dropping.");
+           		return;
+           	} catch (e) {
+           		this.log(evt.data)
+           	}
            	/** Broadcast to all connected sockets **/
            	for (w in this.relays) {
            		i++;
            		if (this.relays[w] == ws) {
-           			this.log("received data from " + i);
+           			/*out = '';
+           			for (var i in evt) {
+           				out += i + ':' + evt[i] + "\n";
+           			}
+           			//this.log(out);*/
+           			this.log("received data from " + this.relays[w]._id);
            		} else {
-           			this.relays[w].send(evt.data);
+           			/*temp = this.relays[w].onmessage;
+           			this.relays[w].onmessage = function(evt) {
+           				this.handler.log(this._id + " received delay message"); 
+           				this.onmessage = temp;
+           			};*/
+           			this.relays[w].send('{"data":"' + evt.data + '"}');
            		}
            	}
 		},
@@ -56,9 +74,11 @@ var gelf = {
               e.preventDefault();
             };
             ws.onmessage = function (evt) {
-               //$('#log').val($('#log').val() + evt.data + '\\n');
+               $('#log').val($('#log').val() + "raw: received from " + this._id + '\n');
             	this.handler.received_message(this, evt);
              };
+            /** hack: to stop message propagation **/
+            //ws.onmessage = ws._onmessage;
             ws.onopen = function() {
                //ws.send(host + " connected");
             	//.log('connected to: ' + ws)
@@ -66,10 +86,12 @@ var gelf = {
             };
             ws.onclose = function(evt) {
                //this.log('Connection closed by server: ' + evt.code + ' \"' + evt.reason + '\"');  
-            	this.handler.received_message(this, evt);
+            	this.handler.log("Server disconnected")
             };
             ws.handler = this;
             this.relays[host] = ws;
+            /** testing **/
+            ws._id = host + '-' + port;
             return true;
 		}
 };
