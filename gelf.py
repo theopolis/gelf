@@ -64,7 +64,7 @@ class GelfWebSocketHandler(WebSocket):
 		cherrypy.engine.publish('websocket-broadcast', TextMessage(reason))
 
 class GelfInterface():
-	def __init__(self, hw_port="", use_header=False, mtu=1500):
+	def __init__(self, mtu=1500):
 		"""
 		Open interface dev for reading, in this example we use a tun0
 		
@@ -73,8 +73,6 @@ class GelfInterface():
 		"""
 		self.mtu = mtu
 		self.fd = None
-		self.hw_port = hw_port
-		self.use_header = use_header
 		
 		self.open_tap()
 	
@@ -134,9 +132,7 @@ class GelfInterface():
 		
 		read_buffer = None
 		try:
-			length = struct.pack('B', len(self.hw_port)) if self.use_header else ""
-			#print "Len:", length
-			read_buffer = base64.b64encode(b"".join([length, self.hw_port, os.read(self.fd, self.mtu)]))
+			read_buffer = base64.b64encode(os.read(self.fd, self.mtu))
 		except OSError as e:
 			print "[G_Interface//Error]:", e
 			sys.exit(1)
@@ -155,10 +151,6 @@ class GelfInterface():
 		except (ValueError, TypeError):
 			return write_status
 		
-		#print "hw_port:", write_buffer[1:write_buffer[0]+1], write_buffer[1:write_buffer[0]+1] == self.hw_port
-		if self.use_header and write_buffer[1:write_buffer[0]+1] == self.hw_port: 
-			# If L1 headers are used, drop data originating from this virtual hw_port
-			return write_status
 		try:
 			print "W Packet: ", len(write_buffer)
 			data = write_buffer[write_buffer[0]+1:] if self.use_header else write_buffer
@@ -236,36 +228,17 @@ class GelfRelayThread(threading.Thread):
 			}
 		})
 
-def start_threads(g_int, ws):
-	threads = []
-	#t = T_Outgoing(g_int, ws)
-	#threads.append(t)
-	#threads[-1].start()
-	return threads
-
-def join_threads(threads):
-	for t in threads:
-		t.join()
-	
-def joiner(signum, frame):
-	print "Caught signal:", signum
-	join_threads()
-	sys.exit() 
-
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Gelf, the layer 1 over HTTP client/server/relay.')
 	parser.add_argument('--host', default='127.0.0.1', help='Hostname used by the web server, default is 127.0.0.1')
-	#parser.add_argument('interface', help='The device name (relative to /dev) that gelf will attach to an http L1 relay (a tap device).')
 	parser.add_argument('port', type=int, help='TCP port used by the web server')
 	parser.add_argument('--ssl', action='store_true', help='Enable SSL via web socket')
-	parser.add_argument("--l1h", action='store_true', help='Add a L1 header, to prevent writing to the origin interface')
 	parser.add_argument("--mtu", default=1500, type=int, help="Set the size of the read buffer for the device interface")
 	parser.add_argument('--enc', help='Use the provided symmetric encryption key to encrypt data')
 	args = parser.parse_args()
 	
 	# Start read/write interface
-	hw_port = b"%s-%s" % (args.host, args.port) if args.l1h else ""
-	interface = GelfInterface(hw_port=hw_port, use_header=args.l1h, mtu=args.mtu)
+	interface = GelfInterface(mtu=args.mtu)
 
 	# Enable websocket plugin for cherrypy
 	ws = WebSocketPlugin(cherrypy.engine)
@@ -276,26 +249,11 @@ if __name__ == "__main__":
 	incoming = GelfIncomingClient(interface, args.host, args.port)
 	outgoing = GelfOutgoingThread(interface, ws)
 
-	#interface.write("hello world")
-
 	time.sleep(2)
 	incoming.connect()
 	outgoing.start()
 	
 	#outgoing.join()
 	#webthread.join()
-	
-	# Debugging
-	"""
-	while len(threads) > 0:
-		try:
-			threads = [t.join(1) for t in threads if t is not None and t.isAlive()]
-		except KeyboardInterrupt:
-			print "[Main//Debug]: Killing I/O threads"
-			for t in threads:
-				t.kill_received = True
-	#join_threads(threads)
-	#cherrypy.quickstart(g_web)
-	"""
 
 
