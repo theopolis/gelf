@@ -5,14 +5,18 @@ import os
 import time
 import struct
 import base64
+import select
+import signal
 
 import cherrypy
 
 from ws4py.server.cherrypyserver import WebSocketPlugin, WebSocketTool
 from ws4py.websocket import WebSocket
 from ws4py.messaging import TextMessage
-
 from ws4py.client.threadedclient import WebSocketClient
+
+#Global resolution
+DEBUG = False
 
 class GelfRelay(object):
 	def __init__(self, host, port):
@@ -23,7 +27,8 @@ class GelfRelay(object):
 	
 	@cherrypy.expose
 	def ws(self):
-		cherrypy.log("Handler created: %s" % repr(cherrypy.request.ws_handler))
+		if DEBUG:
+			cherrypy.log("Handler created: %s" % repr(cherrypy.request.ws_handler))
 	
 	@cherrypy.expose
 	def index(self, name=None):
@@ -35,19 +40,19 @@ class GelfRelay(object):
       <script type='application/javascript' src='/js/jquery-1.6.2.min.js'></script>
       <script type='application/javascript' src='/js/gelf.js'></script>
       <script type='application/javascript'>
-      	$(document).ready(function() { gelf.main('%(host)s', '%(port)s');} );
+      	$(document).ready(function() { gelf.main();} );
       </script>
     </head>
     <body>
     <form action='#' id='relayform' method='get'>
-      <textarea id='log' cols='70' rows='30'></textarea>
+      <textarea id='log' cols='5' rows='5' style="width:100%%"></textarea>
       <br />
       <label for='message'>new: </label><input type='text' id='host' /> <input type='text' id='port' />
       <input id='add' type='button' value='Add' />
       </form>
     </body>
     </html>
-    """ % {'host': self.host, 'port': self.port, 'scheme': self.scheme}
+    """ % {'scheme': self.scheme}
 		return page
 
 class GelfWebSocketHandler(WebSocket):
@@ -66,15 +71,21 @@ class GelfWebSocketHandler(WebSocket):
 class GelfInterface():
 	def __init__(self, mtu=1500):
 		"""
-		Open interface dev for reading, in this example we use a tun0
+		Open a tap interface for reading/writing, supports OS X (tuntap driver) and Linux.
 		
-		Args:
-			dev: the interface to read/write from
+		Keyword Arguments:
+			mtu -- set the size of the read buffer
 		"""
 		self.mtu = mtu
 		self.fd = None
 		
 		self.open_tap()
+	
+	def shutdown(self):
+		try:
+			os.close(self.fd)
+		except:
+			return
 	
 	def darwin_init_interface(self):
 		path = None
@@ -89,7 +100,8 @@ class GelfInterface():
 		if self.fd == None:
 			print "[GelfInterface//Error]: Could not open /dev/tap{0,15}"
 			sys.exit(1)
-		print "[GelfInterface//Notice]: Opened", path
+		if DEBUG:
+			print "[GelfInterface//Notice]: Opened", path
 		return path
 	
 	def linux_init_interface(self):
@@ -131,12 +143,17 @@ class GelfInterface():
 		"""
 		
 		read_buffer = None
+		inputs = [self.fd]
 		try:
-			read_buffer = base64.b64encode(os.read(self.fd, self.mtu))
+			readable, _, _ = select.select(inputs, [], inputs)
+			for fd in readable:
+				if fd is self.fd:
+					read_buffer = base64.b64encode(os.read(fd, self.mtu))
 		except OSError as e:
-			print "[G_Interface//Error]:", e
+			print "[GelfInterface//Error]:", e
 			sys.exit(1)
-		print "R Packet: ", len(read_buffer)
+		if DEBUG:
+			print "[GelfInterface//Notice]: Read data: ", len(read_buffer)
 		return read_buffer
 	
 	def write(self, packet):
@@ -152,9 +169,9 @@ class GelfInterface():
 			return write_status
 		
 		try:
-			print "W Packet: ", len(write_buffer)
-			data = write_buffer[write_buffer[0]+1:] if self.use_header else write_buffer
-			write_status = os.write(self.fd, data)
+			if DEBUG:
+				print "[GelfInterface//Notice]: Write Packet: ", len(write_buffer)
+			write_status = os.write(self.fd, write_buffer)
 		except OSError as e:
 			print e
 			sys.exit(1)
@@ -168,7 +185,8 @@ class GelfOutgoingThread(threading.Thread):
 		self.kill_received = False
 	
 	def run(self):
-		print "[T_Outgoing//Notice]: Running"
+		if DEBUG:
+			print "[GelfOutgoingThread//Notice]: Running"
 		
 		while not self.kill_received:
 			packet = self.interface.read()
@@ -184,17 +202,23 @@ class GelfIncomingClient(WebSocketClient):
 		self.kill_received = False	
 		
 	def opened(self):
-		print "[GelfIncomingThread//Debug]: Running"
+		if DEBUG:
+			print "[GelfIncomingThread//Debug]: Running"
 		
 	def received_message(self, m):
 		"""
 		Read from g_int.read() and write to g_eng.outgoing
 		"""
 		if self.interface is not None:
-			print "[GelfIncomingThread//Debug]: received packet", repr(m)
+			if DEBUG:
+				print "[GelfIncomingThread//Debug]: received packet", repr(m)
 			self.interface.write(m.data)
 
 class GelfRelayThread(threading.Thread):
+	"""
+	Start a Cherrypy HTTP server in a thread.
+	When the server starts, a WebSocket will also start, and Gelf will connect with a surrogate client.
+	"""
 	ws = None
 	started = None
 	def __init__(self, host, port, ws):
@@ -205,7 +229,7 @@ class GelfRelayThread(threading.Thread):
 		
 	def run(self):
 		if ws is None:
-			print "[GelfRelayThread//Error]: WS not provided"
+			print "[GelfRelayThread//Error]: WebSocket not provided"
 			return
 		# Cherrypy configurations
 		cherrypy.config.update({
@@ -228,6 +252,11 @@ class GelfRelayThread(threading.Thread):
 			}
 		})
 
+def handler(signal, frmae):
+	"""Convert CTL+C (SIGINT) to a SIGTERM."""
+	print "I'm dead"
+	os.kill(os.getpid(), 15)
+
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Gelf, the layer 1 over HTTP client/server/relay.')
 	parser.add_argument('--host', default='127.0.0.1', help='Hostname used by the web server, default is 127.0.0.1')
@@ -235,7 +264,13 @@ if __name__ == "__main__":
 	parser.add_argument('--ssl', action='store_true', help='Enable SSL via web socket')
 	parser.add_argument("--mtu", default=1500, type=int, help="Set the size of the read buffer for the device interface")
 	parser.add_argument('--enc', help='Use the provided symmetric encryption key to encrypt data')
+	parser.add_argument('-d', default=False, action='store_true', help='Turn debugging on.')
 	args = parser.parse_args()
+	
+	DEBUG = args.d
+	
+	# Ultra-hack, kill everything with a CTRL+c
+	signal.signal(signal.SIGINT, handler)
 	
 	# Start read/write interface
 	interface = GelfInterface(mtu=args.mtu)
@@ -248,10 +283,15 @@ if __name__ == "__main__":
 	# Start read/write threads
 	incoming = GelfIncomingClient(interface, args.host, args.port)
 	outgoing = GelfOutgoingThread(interface, ws)
+	outgoing.daemon = True
 
 	time.sleep(2)
 	incoming.connect()
 	outgoing.start()
+
+	signal.pause()
+	
+	#webthread.join()
 	
 	#outgoing.join()
 	#webthread.join()
