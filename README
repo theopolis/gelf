@@ -1,8 +1,9 @@
 == Introduction ==
-Gelf is a forwarding application that utilizes two producer / consumer FIFO queues, 
+Gelf is a forwarding application that utilizes a producer / consumer model, 
 a client and server interface, and a web browser to connect the three.
+Imagine a virtual L1 interface via HTTP.
 
-This allows a simple web browser (HTML 5) to route data between two or more hosts.
+This allows a simple web browser (HTML 5) to forward data between two or more L2 interfaces.
 The initial use case for this application was as a mobile device tethering solution, 
 where no code execution (aside from Javascript) on the mobile device is possible.
 
@@ -30,7 +31,7 @@ On the second server (server2) run:
 
 In a web browser that has access to both servers open either's web interface
 3) http://server1:7001
-Then add server1:7001 as a second WS using the web interface.
+Then add server2:7001 as a second WS using the web interface.
 
 Optional:
 4) server1$ sudo ifconfig tap0 10.3.2.1
