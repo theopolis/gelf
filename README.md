@@ -1,7 +1,46 @@
 == Introduction ==
-Gelf is a forwarding application that utilizes two producer / consumer FIFO queues, a client and server interface, and a web browser to connect the three.
+Gelf is a forwarding application that utilizes two producer / consumer FIFO queues, 
+a client and server interface, and a web browser to connect the three.
 
-This allows a simple web browser (HTML 4/5) to route data between two or more hosts. The initial use case for this application was as a mobile device 
-tethering solution, where no code execution (aside from Javascript) on the mobile device is possible.
+This allows a simple web browser (HTML 5) to route data between two or more hosts.
+The initial use case for this application was as a mobile device tethering solution, 
+where no code execution (aside from Javascript) on the mobile device is possible.
 
+== Requirements ==
+- OS X or Linux, with the appropriate tuntap driver installed
+- Python CherryPy version >= 3.2.2
+- Python ws4py module (https://github.com/Lawouach/WebSocket-for-Python)
 
+== Explaination ==
+The application works by creating a tap interface, and starting a websocket server,
+then opening the tap interface for reading/writing. Only, data read from the tap is 
+forwarded via an HTML 5 websocket, and data read from the websocket is written to the tap.
+
+Using the application's web interface as a websocket client, and the included Javascript
+routine, data is broadcasted between one or more websockets. Imagine the web interface
+as a virtual hardware device. By connecting to additional gelf websocket servers, you are
+'attaching' network links to device.
+
+== How to ==
+On the first server (server1) run:
+1) server1$ sudo python ./gelf.py --host 0.0.0.0 7001
+
+On the second server (server2) run:
+2) server2$ sudo python ./gelf.py --host 0.0.0.0 7001
+
+In a web browser that has access to both servers open either's web interface
+3) http://server1:7001
+Then add server1:7001 as a second WS using the web interface.
+
+Optional:
+4) server1$ sudo ifconfig tap0 10.3.2.1
+5) server2$ sudo ifconfig tap0 10.3.2.2
+6) server1$ sudo route add default gw 10.3.2.2
+
+== To do ==
+- Find an optimization for MTU (which is actually the read buffer from the interface).
+  Gelf does not set the actual MTU for the created tap device. Finding an optimal buffer
+  size (accounting for HTTP headers, and the L1 forwarding header) will speed up tranfers.
+- Add symmetric encryption to the L2 data before transferring/forwarding via websocket
+- Clean up tear-down code
+- Create a cleaner web interface
