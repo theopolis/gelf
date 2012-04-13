@@ -3,24 +3,27 @@ Gelf is a forwarding application that utilizes a producer / consumer model,
 a client and server interface, and a web browser to connect the three.
 Imagine a virtual L1 interface via HTTP.
 
-This allows a simple web browser (HTML 5) to forward data between two or more L2 interfaces.
-The initial use case for this application was as a mobile device tethering solution, 
-where no code execution (aside from Javascript) on the mobile device is possible.
+This allows a simple web browser (HTML 5) to forward data between two or more L2 
+interfaces. The initial use case for this application was as a mobile device 
+tethering solution, where no code execution (aside from JavaScript) on the mobile 
+device is possible.
 
 == Requirements ==
 - OS X or Linux, with the appropriate tuntap driver installed
 - Python CherryPy version >= 3.2.2
 - Python ws4py module (https://github.com/Lawouach/WebSocket-for-Python)
+- Python PyCrypto if encryption is enabled
 
 == Explaination ==
-The application works by creating a tap interface, and starting a websocket server,
+The application works by creating a tap interface, and starting a WebSocket server,
 then opening the tap interface for reading/writing. Only, data read from the tap is 
-forwarded via an HTML 5 websocket, and data read from the websocket is written to the tap.
+forwarded via an HTML 5 WebSocket, and data read from the WebSocket is written to the 
+tap.
 
-Using the application's web interface as a websocket client, and the included Javascript
-routine, data is broadcasted between one or more websockets. Imagine the web interface
-as a virtual hardware device. By connecting to additional gelf websocket servers, you are
-'attaching' network links to device.
+Using the application's web interface as a WebSocket client, and the included 
+JavaScript routine, data is broadcasted between one or more WebSockets. Imagine the 
+web interface as a virtual hardware device. By connecting to additional Gelf 
+WebSocket servers, you are 'attaching' network links to device.
 
 == How to ==
 On the first server (server1) run:
@@ -38,10 +41,24 @@ Optional:
 5) server2$ sudo ifconfig tap0 10.3.2.2
 6) server1$ sudo route add default gw 10.3.2.2
 
+== Encryption ==
+You can provide a 128bit symmetric encryption key to encrypt L2 traffic using the
+[--key] switch followed by a hex-encoded 16 byte key. You can let Gelf (and your OS)
+choose the key for you using the [--enc] switch without a [--key], on the first link.
+You'll need to use the generated key on additional links. 
+ 
+To symmetrically encrypt data between L2 interfaces use the following example:
+1) server1$ sudo python ./gelf.py --host 0.0.0.0 --enc 7001
+Encryption key: b04c96f0e62fd14424e7e58e3d8ba957
+[...]
+
+2) server2$ sudo python ./gelf.py --host 0.0.0.0 \
+  --key b04c96f0e62fd14424e7e58e3d8ba957 7001
+
 == To do ==
-- Find an optimization for MTU (which is actually the read buffer from the interface).
-  Gelf does not set the actual MTU for the created tap device. Finding an optimal buffer
-  size (accounting for HTTP headers, and the L1 forwarding header) will speed up tranfers.
-- Add symmetric encryption to the L2 data before transferring/forwarding via websocket
+- Find an optimization for MTU (which is actually the read buffer from the 
+  interface). Gelf does not set the actual MTU for the created tap device. 
+  Finding an optimal buffer size (accounting for HTTP headers, and the L1 
+  forwarding header) will speed up tranfers.
 - Clean up tear-down code
 - Create a cleaner web interface

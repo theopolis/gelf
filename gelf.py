@@ -69,13 +69,28 @@ class GelfWebSocketHandler(WebSocket):
 		cherrypy.engine.publish('websocket-broadcast', TextMessage(reason))
 
 class GelfInterface():
-	def __init__(self, mtu=1500):
+	def __init__(self, mtu=1500, enc=False, key=None):
 		"""
 		Open a tap interface for reading/writing, supports OS X (tuntap driver) and Linux.
 		
 		Keyword Arguments:
 			mtu -- set the size of the read buffer
 		"""
+		if enc:
+			if key is None:
+				"""Encryption enabled, no key provided"""
+				self.key = os.urandom(16) #128=16*8
+				print "Encryption key:", self.key.encode("hex")
+			else:
+				"""Key provided as hex"""
+				try:
+					self.key = key.decode("hex") 
+					print "Encryption enabled"
+				except:
+					print "[GelfInterface//Error]: Incorrect key provided"
+					self.key = None
+		else:
+			self.key = None
 		self.mtu = mtu
 		self.fd = None
 		
@@ -135,7 +150,36 @@ class GelfInterface():
 		else:
 			print "[GelfInterface//Error]: Unknown system", platform.system()
 			sys.exit(1)
+		print "Created interface:", dev
 		subprocess.call(["/sbin/ifconfig", dev, "up"])
+	
+	def encrypt(self, data):
+		"""
+		When a symmetric key is set, use AES CFB with an IV.
+		This makes the data slightly larger, 16bytes for IV, and 4 bytes for CRC
+		IV    = unique per packet
+		C     = AES(k, packet, iv)
+		cksum = crc32 of packet"""
+		iv = os.urandom(16)
+		encryptor = AES.new(self.key, AES.MODE_CFB, iv)
+		data += struct.pack('i', zlib.crc32(data))
+		return ''.join([iv, encryptor.encrypt(data)])
+		pass
+	
+	def decrypt(self, data):
+		"""
+		When a symmetric key is set, use AES CFB with an IV.
+		Expect data as |-16B-IV-|---Packet---|-4B-CRC-|"""
+		iv = data[:16]
+		decryptor = AES.new(self.key, AES.MODE_CFB, iv)
+		data = decryptor.decrypt(data[16:])
+		data, crc = (data[:-4], data[-4:])
+		if not crc == struct.pack('i', zlib.crc32(data)):
+			if DEBUG:
+				print "[GelfInterface//Notice]: Incorrect CRC"
+			data = ""
+		return data
+		pass
 		
 	def read(self):
 		"""
@@ -148,7 +192,11 @@ class GelfInterface():
 			readable, _, _ = select.select(inputs, [], inputs)
 			for fd in readable:
 				if fd is self.fd:
-					read_buffer = base64.b64encode(os.read(fd, self.mtu))
+					read_buffer = os.read(fd, self.mtu)
+					if self.key is not None:
+						"""Encryption enabled"""
+						read_buffer = self.encrypt(read_buffer)
+					read_buffer = base64.b64encode(read_buffer)
 		except OSError as e:
 			print "[GelfInterface//Error]:", e
 			sys.exit(1)
@@ -168,6 +216,9 @@ class GelfInterface():
 		except (ValueError, TypeError):
 			return write_status
 		
+		if self.key is not None:
+			"""Encryption enabled"""
+			write_buffer = self.decrypt(write_buffer)
 		try:
 			if DEBUG:
 				print "[GelfInterface//Notice]: Write Packet: ", len(write_buffer)
@@ -233,6 +284,8 @@ class GelfRelayThread(threading.Thread):
 			return
 		# Cherrypy configurations
 		cherrypy.config.update({
+			"server.environment": "development" if DEBUG else "production",
+			"log.screen": True if DEBUG else False,
 			"server.socket_host": self.host,
 			"server.socket_port": self.port,
 			"tools.staticdir.root": os.path.abspath(os.path.join(os.path.dirname(__file__), 'static'))
@@ -240,6 +293,7 @@ class GelfRelayThread(threading.Thread):
 		ws.subscribe()
 		cherrypy.tools.websocket = WebSocketTool()
 	
+		print "Relay listening:", self.host, self.port
 		# Set websocket url, and static js directory	
 		cherrypy.quickstart(GelfRelay(self.host, self.port), '', config={
 			"/ws": {
@@ -259,11 +313,12 @@ def handler(signal, frmae):
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Gelf, the layer 1 over HTTP client/server/relay.')
-	parser.add_argument('--host', default='127.0.0.1', help='Hostname used by the web server, default is 127.0.0.1')
-	parser.add_argument('port', type=int, help='TCP port used by the web server')
-	parser.add_argument('--ssl', action='store_true', help='Enable SSL via web socket')
-	parser.add_argument("--mtu", default=1500, type=int, help="Set the size of the read buffer for the device interface")
-	parser.add_argument('--enc', help='Use the provided symmetric encryption key to encrypt data')
+	parser.add_argument('--host', default='127.0.0.1', help='Hostname used by the web server, default is 127.0.0.1.')
+	parser.add_argument('port', type=int, help='TCP port used by the web server.')
+	parser.add_argument('--ssl', action='store_true', help='[Not Implemented] Enable SSL via web socket.')
+	parser.add_argument("--mtu", default=1500, type=int, help="Set the size of the read buffer for the device interface.")
+	parser.add_argument('--key', help='Use the provided symmetric encryption key, in hex format.')
+	parser.add_argument('--enc', action='store_true', help='Enable symmetric encryption, use without --key to generate a key.')
 	parser.add_argument('-d', default=False, action='store_true', help='Turn debugging on.')
 	args = parser.parse_args()
 	
@@ -272,8 +327,15 @@ if __name__ == "__main__":
 	# Ultra-hack, kill everything with a CTRL+c
 	signal.signal(signal.SIGINT, handler)
 	
+	# Encryption options
+	if args.key:
+		args.enc = True
+	if args.enc:
+		from Crypto.Cipher import AES
+		import zlib
+	
 	# Start read/write interface
-	interface = GelfInterface(mtu=args.mtu)
+	interface = GelfInterface(mtu=args.mtu, enc=args.enc, key=args.key)
 
 	# Enable websocket plugin for cherrypy
 	ws = WebSocketPlugin(cherrypy.engine)
